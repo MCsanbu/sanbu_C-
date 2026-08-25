@@ -1,9 +1,8 @@
 # Cyber Clock
 
-A small Windows desktop clock that stays centered at the top of the screen. Its
-background is fully transparent. Each character samples the desktop directly
-below it and uses that sampled color's RGB complement, keeping the display
-contrasting with what is behind it.
+A small Windows desktop clock that stays centered at the top of the screen. It
+uses a 24-hour digital display with cyan and magenta neon styling, scan lines,
+and a technical frame.
 
 ## Build and run
 
