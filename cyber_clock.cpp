@@ -4,47 +4,55 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <shellapi.h>
 
 #include <ctime>
 #include <iterator>
 
 namespace {
-constexpr int kWidth = 540;
-constexpr int kHeight = 116;
+constexpr int kWidth = 380;
+constexpr int kHeight = 96;
 constexpr UINT_PTR kClockTimer = 1;
+constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kTrayIconId = 1;
+constexpr UINT kExitCommand = 1001;
 
-COLORREF Blend(COLORREF from, COLORREF to, int amount, int scale = 255) {
-    return RGB(GetRValue(from) + (GetRValue(to) - GetRValue(from)) * amount / scale,
-               GetGValue(from) + (GetGValue(to) - GetGValue(from)) * amount / scale,
-               GetBValue(from) + (GetBValue(to) - GetBValue(from)) * amount / scale);
+COLORREF ContrastColor(COLORREF color) {
+    // The RGB complement is the requested contrasting color for the sampled backdrop.
+    return RGB(255 - GetRValue(color), 255 - GetGValue(color), 255 - GetBValue(color));
 }
 
-void FillVerticalGradient(HDC dc, const RECT& area, COLORREF top, COLORREF bottom) {
-    for (int y = area.top; y < area.bottom; ++y) {
-        const int amount = (y - area.top) * 255 / (area.bottom - area.top);
-        HPEN pen = CreatePen(PS_SOLID, 1, Blend(top, bottom, amount));
-        HGDIOBJ old = SelectObject(dc, pen);
-        MoveToEx(dc, area.left, y, nullptr);
-        LineTo(dc, area.right, y);
-        SelectObject(dc, old);
-        DeleteObject(pen);
-    }
+void AddTrayIcon(HWND window) {
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = window;
+    icon.uID = kTrayIconId;
+    icon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    icon.uCallbackMessage = kTrayMessage;
+    icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    lstrcpynW(icon.szTip, L"Cyber Clock", std::size(icon.szTip));
+    Shell_NotifyIconW(NIM_ADD, &icon);
+    icon.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &icon);
 }
 
-void DrawGlowText(HDC dc, const wchar_t* text, RECT rect, HFONT font) {
-    HGDIOBJ oldFont = SelectObject(dc, font);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(255, 15, 171));
-    for (int offset = 5; offset >= 2; --offset) {
-        RECT glow = rect;
-        OffsetRect(&glow, offset, 0);
-        DrawTextW(dc, text, -1, &glow, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        OffsetRect(&glow, -2 * offset, 0);
-        DrawTextW(dc, text, -1, &glow, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    SetTextColor(dc, RGB(82, 252, 255));
-    DrawTextW(dc, text, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, oldFont);
+void RemoveTrayIcon(HWND window) {
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = window;
+    icon.uID = kTrayIconId;
+    Shell_NotifyIconW(NIM_DELETE, &icon);
+}
+
+void ShowTrayMenu(HWND window) {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, kExitCommand, L"Exit Cyber Clock");
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    SetForegroundWindow(window);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, nullptr);
+    PostMessageW(window, WM_NULL, 0, 0);
+    DestroyMenu(menu);
 }
 
 void PaintClock(HWND window) {
@@ -54,21 +62,8 @@ void PaintClock(HWND window) {
     HBITMAP bitmap = CreateCompatibleBitmap(screen, kWidth, kHeight);
     HGDIOBJ oldBitmap = SelectObject(buffer, bitmap);
 
-    RECT client{0, 0, kWidth, kHeight};
-    FillVerticalGradient(buffer, client, RGB(9, 7, 28), RGB(18, 5, 37));
-
-    // Subtle scan lines and a cyan/magenta technical frame.
-    for (int y = 8; y < kHeight; y += 8) {
-        HPEN line = CreatePen(PS_SOLID, 1, RGB(29, 19, 57));
-        HGDIOBJ old = SelectObject(buffer, line);
-        MoveToEx(buffer, 0, y, nullptr); LineTo(buffer, kWidth, y);
-        SelectObject(buffer, old); DeleteObject(line);
-    }
-    HPEN cyan = CreatePen(PS_SOLID, 2, RGB(54, 242, 255));
-    HGDIOBJ oldPen = SelectObject(buffer, cyan);
-    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(buffer, GetStockObject(HOLLOW_BRUSH)));
-    Rectangle(buffer, 5, 5, kWidth - 6, kHeight - 6);
-    SelectObject(buffer, oldBrush); SelectObject(buffer, oldPen); DeleteObject(cyan);
+    // Black is a color key (configured below), so every non-digit pixel is transparent.
+    PatBlt(buffer, 0, 0, kWidth, kHeight, BLACKNESS);
 
     std::time_t raw = std::time(nullptr);
     std::tm local{};
@@ -76,17 +71,24 @@ void PaintClock(HWND window) {
     wchar_t timeText[16];
     wcsftime(timeText, std::size(timeText), L"%H:%M:%S", &local);
 
-    HFONT timeFont = CreateFontW(64, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    HFONT timeFont = CreateFontW(68, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH, L"Consolas");
-    DrawGlowText(buffer, timeText, RECT{34, 19, kWidth - 34, 93}, timeFont);
+    HGDIOBJ oldFont = SelectObject(buffer, timeFont);
+    SetBkMode(buffer, TRANSPARENT);
+    SIZE characterSize{};
+    GetTextExtentPoint32W(buffer, L"0", 1, &characterSize);
+    const int startX = (kWidth - characterSize.cx * 8) / 2;
+    RECT windowRect{};
+    GetWindowRect(window, &windowRect);
+    for (int index = 0; index < 8; ++index) {
+        // The sample is directly below each character, where this color-key window is transparent.
+        const COLORREF behindDigit = GetPixel(screen, windowRect.left + startX + characterSize.cx * index
+            + characterSize.cx / 2, windowRect.top + kHeight - 2);
+        SetTextColor(buffer, ContrastColor(behindDigit == CLR_INVALID ? RGB(0, 0, 0) : behindDigit));
+        TextOutW(buffer, startX + characterSize.cx * index, 8, &timeText[index], 1);
+    }
+    SelectObject(buffer, oldFont);
     DeleteObject(timeFont);
-
-    HFONT labelFont = CreateFontW(13, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    HGDIOBJ oldFont = SelectObject(buffer, labelFont);
-    SetBkMode(buffer, TRANSPARENT); SetTextColor(buffer, RGB(255, 69, 191));
-    TextOutW(buffer, 19, 11, L"SYSTEM TIME // 24H", 18);
-    SelectObject(buffer, oldFont); DeleteObject(labelFont);
 
     BitBlt(screen, 0, 0, kWidth, kHeight, buffer, 0, 0, SRCCOPY);
     SelectObject(buffer, oldBitmap); DeleteObject(bitmap); DeleteDC(buffer);
@@ -105,18 +107,28 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         switch (message) {
         case WM_PAINT: PaintClock(window); return 0;
         case WM_TIMER: InvalidateRect(window, nullptr, FALSE); return 0;
-        case WM_NCHITTEST: return HTCAPTION; // Drag the clock from any point.
-        case WM_RBUTTONUP: DestroyWindow(window); return 0;
-        case WM_DESTROY: PostQuitMessage(0); return 0;
+        case WM_ERASEBKGND: return 1;
+        case kTrayMessage:
+            if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) ShowTrayMenu(window);
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == kExitCommand) DestroyWindow(window);
+            return 0;
+        case WM_DESTROY:
+            RemoveTrayIcon(window);
+            PostQuitMessage(0);
+            return 0;
         default: return DefWindowProcW(window, message, wParam, lParam);
         }
     };
     RegisterClassW(&wc);
 
     const int left = (GetSystemMetrics(SM_CXSCREEN) - kWidth) / 2;
-    HWND window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, className, L"Cyber Clock",
+    HWND window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, className, L"Cyber Clock",
         WS_POPUP, left, 0, kWidth, kHeight, nullptr, nullptr, instance, nullptr);
     if (!window) return 1;
+    SetLayeredWindowAttributes(window, RGB(0, 0, 0), 0, LWA_COLORKEY);
+    AddTrayIcon(window);
     SetTimer(window, kClockTimer, 250, nullptr);
     ShowWindow(window, SW_SHOWNOACTIVATE);
     UpdateWindow(window);
